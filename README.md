@@ -93,6 +93,8 @@ Controls the Hough Circle Transform algorithm used to identify the distinct dark
 
 **C.    Analysis Settings**
 
+*   **Set Analysis ROI (Crop):** This setting allows you to select which portion of the image to analyze. The image can often have a "vignette" that impacts the background signal you subtract against and can also negatively impact measurements of DEs inside darker areas, so setting the ROI can help minimize measurement artifacts.
+
 *   **Shrink ROI (px):** This setting peels layers of pixels off the outer edge of the detected circle before measuring intensity.
 
     *   **Why use it?** Double emulsions have thick dark rings. You want to measure the fluorescence of the inner core, avoiding the dark ring or the oil shell. Increasing this value samples more from the bright core and can reduce artifacts in quantification that increase variability.
@@ -143,6 +145,8 @@ Controls the Hough Circle Transform algorithm used to identify the distinct dark
 
 5.  **Analyze & Export:**
 
+    *   Set the analysis ROI (crop) to your desired area.
+
     *   Set Shrink ROI to a pixel value that isolates the droplet cores and minimizes variability.
 
     *   Use the Graph Channel dropdown to check the data quality for each fluorophore.
@@ -153,19 +157,48 @@ Controls the Hough Circle Transform algorithm used to identify the distinct dark
 
 The tool exports a `.xlsx` file containing row-by-row data for every detected double emulsion and the parameters and distribution information for each channel.
 
-### General Info
+### Summary Page
+
+**Parameters:**
+
+*   **Edge Thresh:** See Segmentation
+*   **Circ Thresh:** See Segmentation
+*   **Min/Max Radius:** See Segmentation
+*   **Shrink ROI:** See Analysis Settings
+*   **Background Mode:** See Analysis Settings
+*   **Analysis region:** Region selected for analysis (modified if crop is used).
+*   **Total Area:** Area analyzed in px^2. Can be used to calculate concentration if you can convert pixels to absolute area measurements.
+
+**Summary Stats:**
+
+*   **Channel:** The channel selected for the measurement.
+*   **N (Count):** Number of DEs in selection.
+*   **Area (px^2):** Area of selection for analysis.
+*   **Density (N/px^2:**) Can be equated to DE concentration if you can convert pixels to absolute area measuements and know the height of the slide.
+*   **Mean:** Mean intensity of DEs in the channel (subtracting background).
+*   **Std Dev:** Standard deviation of intensity measurements for DEs in the channel.
+*   **KDE Peak:** The mode of the smoothed distribution of DE intensities in the channel.
+*   **Background Used:** Calculated intensity for the background of the selection space by which other intensities are subtracted against.
+
+
+### Droplet Data Page
+
+**General Info:**
+
 * **`ID`**: The unique identifier for each droplet (corresponds to the ID shown in the hover tooltip).
 * **`Valid`**: A `True` / `False` flag.
     * `True`: The droplet was included in the analysis.
     * `False`: The droplet was manually excluded (turned red) by the user.
 
-### Geometric Measurements
+**Geometric Measurements:**
+
 * **`R_BF` (Radius Brightfield)**: The radius (in pixels) of the droplet as detected by the segmentation algorithm on the Brightfield channel (the cyan circle).
 * **`R_Fluor` (Radius Fluorescence)**: The "shrunk" radius used for intensity measurement.
     * *Calculation:* `R_BF` minus the "Shrink ROI" value.
     * *Purpose:* Ensures measurement of the **inner core** only.
 
-### Intensity Measurements
+**Intensity Measurements:**
+
 For each channel (Ch1, Ch2, etc.), there are two columns:
 
 * **`ChX_Raw` (Raw Intensity)**: The mean pixel intensity inside the `R_Fluor` circle. This is the direct measurement from the image without any modification.
