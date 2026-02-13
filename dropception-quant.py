@@ -316,6 +316,44 @@ class MainWindow(QtWidgets.QMainWindow):
         self.flat_channels = []    # List of normalized flatfield images (numpy arrays)
         self.ff_mapping = {}       # Dict mapping Analysis_Ch_Index -> FF_Ch_Index
         self.use_flatfield = False # Master toggle
+
+        #Cache Storage
+        self.cached_processed_images = {} # Key: Channel Index, Value: Processed Image
+    
+    def refresh_cache(self):
+        """
+        re-calculates processed images for ALL channels and stores them.
+        Call this ONLY when:
+        1. New image loaded
+        2. New flatfield loaded
+        3. Flatfield mapping changes
+        4. 'Apply Correction' is toggled
+        """
+        self.cached_processed_images = {}
+        
+        if not self.channels: return
+
+        # Process every channel
+        for ch_idx, raw in enumerate(self.channels):
+            processed = raw
+            
+            # Apply Flatfield if enabled
+            if self.use_flatfield:
+                ff_idx = self.ff_mapping.get(ch_idx, -1)
+                if ff_idx != -1 and ff_idx < len(self.flat_channels):
+                    ff_img = self.flat_channels[ff_idx]
+                    
+                    # Safety Resize
+                    if raw.shape != ff_img.shape:
+                        ff_img = cv2.resize(ff_img, (raw.shape[1], raw.shape[0]))
+                    
+                    # Division
+                    with np.errstate(divide='ignore', invalid='ignore'):
+                        processed = raw.astype(np.float32) / ff_img
+                    
+                    processed = np.nan_to_num(processed).astype(raw.dtype)
+            
+            self.cached_processed_images[ch_idx] = processed
     
     def handle_roi_finish(self):
         """Called when user releases mouse after drawing Green ROI"""
@@ -369,6 +407,7 @@ class MainWindow(QtWidgets.QMainWindow):
             
             # Default Mapping (1:1)
             self.ff_mapping = {i: i for i in range(min(len(self.channels), len(self.flat_channels)))}
+            self.refresh_cache()
             
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Error", f"Failed to load flatfield: {e}")
@@ -402,6 +441,7 @@ class MainWindow(QtWidgets.QMainWindow):
             # Save mapping
             for i, combo in enumerate(combos):
                 self.ff_mapping[i] = combo.currentData()
+                self.refresh_cache()
             # Re-process if enabled
             if self.chk_apply_ff.isChecked():
                 self.update_viewer()
@@ -409,31 +449,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def toggle_flatfield(self):
         self.use_flatfield = self.chk_apply_ff.isChecked()
+        self.refresh_cache()
         self.update_viewer()
         self.analyze_data()
 
     def get_processed_image(self, ch_idx):
-        """Helper to get image data with optional Flatfield correction applied."""
-        raw = self.channels[ch_idx]
-        
-        if self.use_flatfield:
-            ff_idx = self.ff_mapping.get(ch_idx, -1)
-            if ff_idx != -1 and ff_idx < len(self.flat_channels):
-                ff_img = self.flat_channels[ff_idx]
-                
-                # Resize FF if dimensions don't match (safety)
-                if raw.shape != ff_img.shape:
-                    ff_img = cv2.resize(ff_img, (raw.shape[1], raw.shape[0]))
-                
-                # Apply: Corrected = Raw / Flatfield_Norm
-                # Handle potential divide by zero or noise
-                with np.errstate(divide='ignore', invalid='ignore'):
-                    corrected = raw.astype(np.float32) / ff_img
-                
-                corrected = np.nan_to_num(corrected).astype(raw.dtype)
-                return corrected
-                
-        return raw
+        """Helper to get cached image data."""
+        if ch_idx in self.cached_processed_images:
+            return self.cached_processed_images[ch_idx]
+        else:
+            # Fallback if cache missed (shouldn't happen if logic is correct)
+            return self.channels[ch_idx]
 
     def setup_controls(self):
         l = self.controls_layout
@@ -578,6 +604,8 @@ class MainWindow(QtWidgets.QMainWindow):
         elif data.ndim == 3 and data.shape[0] > data.shape[2]: data = np.moveaxis(data, 2, 0) # Fix (H,W,C)
         
         self.channels = [data[i] for i in range(data.shape[0])]
+
+        self.refresh_cache()
         
         # Clear Layouts
         for i in reversed(range(self.ch_layout.count())): 
