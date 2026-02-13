@@ -311,11 +311,129 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setup_controls()
         self.splitter.setSizes([900, 300])
         self.viewer.roi_finished_signal.connect(self.handle_roi_finish)
+
+        # Flatfield Correction Storage
+        self.flat_channels = []    # List of normalized flatfield images (numpy arrays)
+        self.ff_mapping = {}       # Dict mapping Analysis_Ch_Index -> FF_Ch_Index
+        self.use_flatfield = False # Master toggle
     
     def handle_roi_finish(self):
         """Called when user releases mouse after drawing Green ROI"""
         self.btn_set_roi.setChecked(False) # Uncheck the button
         self.analyze_data()
+
+    def load_flatfield(self):
+        # Allow selecting multiple files (to average them) or a single stack
+        fnames, _ = QtWidgets.QFileDialog.getOpenFileNames(self, 'Open Flatfield Reference', '', "Images (*.tif *.tiff *.ome.tif)")
+        if not fnames: return
+        
+        try:
+            accum_stack = None
+            count = 0
+            
+            # Load and Average all selected files
+            for f in fnames:
+                with tifffile.TiffFile(f) as tif:
+                    data = tif.asarray()
+                
+                # Fix dimensions to (C, H, W) logic
+                if data.ndim == 2: data = data[np.newaxis, :, :]
+                elif data.ndim == 3 and data.shape[0] > data.shape[2]: data = np.moveaxis(data, 2, 0)
+                
+                if accum_stack is None:
+                    accum_stack = data.astype(np.float32)
+                else:
+                    if data.shape == accum_stack.shape:
+                        accum_stack += data.astype(np.float32)
+                count += 1
+            
+            # Average
+            avg_stack = accum_stack / count
+            
+            # Normalize (Calculate Correction Matrices)
+            # Matrix = Image / Mean(Image). This centers the correction around 1.0.
+            self.flat_channels = []
+            for i in range(avg_stack.shape[0]):
+                ch = avg_stack[i]
+                # Avoid divide by zero if image is purely black
+                mean_val = np.mean(ch)
+                if mean_val > 0:
+                    norm_ch = ch / mean_val
+                else:
+                    norm_ch = np.ones_like(ch) # No correction possible
+                self.flat_channels.append(norm_ch)
+            
+            self.lbl_ff_status.setText(f"Loaded {len(self.flat_channels)} Ch Reference")
+            self.btn_map_ff.setEnabled(True)
+            self.chk_apply_ff.setEnabled(True)
+            
+            # Default Mapping (1:1)
+            self.ff_mapping = {i: i for i in range(min(len(self.channels), len(self.flat_channels)))}
+            
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Error", f"Failed to load flatfield: {e}")
+
+    def open_ff_mapping_dialog(self):
+        """Simple dialog to match Analysis Channels to Flatfield Channels"""
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("Map Flatfield Channels")
+        layout = QtWidgets.QFormLayout(dlg)
+        
+        combos = []
+        for i, ch in enumerate(self.channels):
+            combo = QtWidgets.QComboBox()
+            combo.addItem("None", -1)
+            for j in range(len(self.flat_channels)):
+                combo.addItem(f"Flatfield Ch {j+1}", j)
+            
+            # Set current selection
+            current_ff = self.ff_mapping.get(i, -1)
+            if current_ff != -1 and current_ff < len(self.flat_channels):
+                combo.setCurrentIndex(current_ff + 1) # +1 because of "None"
+                
+            layout.addRow(f"Analysis Ch {i+1}:", combo)
+            combos.append(combo)
+            
+        btn_ok = QtWidgets.QPushButton("OK")
+        btn_ok.clicked.connect(dlg.accept)
+        layout.addRow(btn_ok)
+        
+        if dlg.exec_() == QtWidgets.QDialog.Accepted:
+            # Save mapping
+            for i, combo in enumerate(combos):
+                self.ff_mapping[i] = combo.currentData()
+            # Re-process if enabled
+            if self.chk_apply_ff.isChecked():
+                self.update_viewer()
+                self.analyze_data()
+
+    def toggle_flatfield(self):
+        self.use_flatfield = self.chk_apply_ff.isChecked()
+        self.update_viewer()
+        self.analyze_data()
+
+    def get_processed_image(self, ch_idx):
+        """Helper to get image data with optional Flatfield correction applied."""
+        raw = self.channels[ch_idx]
+        
+        if self.use_flatfield:
+            ff_idx = self.ff_mapping.get(ch_idx, -1)
+            if ff_idx != -1 and ff_idx < len(self.flat_channels):
+                ff_img = self.flat_channels[ff_idx]
+                
+                # Resize FF if dimensions don't match (safety)
+                if raw.shape != ff_img.shape:
+                    ff_img = cv2.resize(ff_img, (raw.shape[1], raw.shape[0]))
+                
+                # Apply: Corrected = Raw / Flatfield_Norm
+                # Handle potential divide by zero or noise
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    corrected = raw.astype(np.float32) / ff_img
+                
+                corrected = np.nan_to_num(corrected).astype(raw.dtype)
+                return corrected
+                
+        return raw
 
     def setup_controls(self):
         l = self.controls_layout
@@ -328,6 +446,36 @@ class MainWindow(QtWidgets.QMainWindow):
         # 2. Channels
         gb = QtWidgets.QGroupBox("2. View Layers"); self.ch_layout = QtWidgets.QVBoxLayout()
         gb.setLayout(self.ch_layout); l.addWidget(gb)
+
+        # --- NEW GROUP: Flatfield Correction ---
+        gb_ff = QtWidgets.QGroupBox("Flatfield Correction")
+        l_ff = QtWidgets.QVBoxLayout()
+        
+        # Load Button
+        self.btn_load_ff = QtWidgets.QPushButton("Load Flatfield Image(s)")
+        self.btn_load_ff.clicked.connect(self.load_flatfield)
+        l_ff.addWidget(self.btn_load_ff)
+        
+        # Status Label
+        self.lbl_ff_status = QtWidgets.QLabel("No Reference Loaded")
+        self.lbl_ff_status.setStyleSheet("color: gray; font-style: italic;")
+        l_ff.addWidget(self.lbl_ff_status)
+        
+        # Map Channels Button
+        self.btn_map_ff = QtWidgets.QPushButton("Map Channels")
+        self.btn_map_ff.clicked.connect(self.open_ff_mapping_dialog)
+        self.btn_map_ff.setEnabled(False)
+        l_ff.addWidget(self.btn_map_ff)
+        
+        # Enable Checkbox
+        self.chk_apply_ff = QtWidgets.QCheckBox("Apply Correction")
+        self.chk_apply_ff.toggled.connect(self.toggle_flatfield)
+        self.chk_apply_ff.setEnabled(False)
+        l_ff.addWidget(self.chk_apply_ff)
+        
+        gb_ff.setLayout(l_ff)
+        l.addWidget(gb_ff)
+        # ---------------------------------------
 
         # 3. Segmentation
         gb = QtWidgets.QGroupBox("3. Segmentation"); v = QtWidgets.QVBoxLayout()
@@ -458,8 +606,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def update_viewer(self):
         layers = []
         for w in self.channel_widgets:
+            # CHANGE: Use helper method
+            img_data = self.get_processed_image(w.index)
+            
             layers.append({
-                'data': self.channels[w.index],
+                'data': img_data, # <--- Changed from self.channels[w.index]
                 'visible': w.chk_visible.isChecked(),
                 'color': w.combo_color.currentText(),
                 'clip': w.slider_clip.value()
@@ -491,7 +642,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.analyze_data() # Update stats on new segmentation
 
     def get_bg_val(self, ch_idx):
-        img = self.channels[ch_idx]
+        # CHANGE: Use the helper to get the potentially Flatfield-corrected image
+        img = self.get_processed_image(ch_idx) 
         
         # 1. Determine the "Universe" (Full image or Crop)
         if self.viewer.analysis_roi:
@@ -505,19 +657,16 @@ class MainWindow(QtWidgets.QMainWindow):
             universe = img
             offset_x, offset_y = 0, 0
 
-        # 2. Manual BG Mode (User draws a yellow box)
+        # 2. Manual BG Mode
         if self.rb_man.isChecked() and self.viewer.bg_roi_rect:
             bx, by, bw, bh = self.viewer.bg_roi_rect
-            # Must intersect with universe? usually manual override ignores crop logic, 
-            # but safer to just return the mean of that box directly.
             roi = img[int(by):int(by+bh), int(bx):int(bx+bw)]
             return np.mean(roi) if roi.size else 0
         
-        # 3. Auto BG Mode (Empty Space inside Universe)
+        # 3. Auto BG Mode
         mask = np.zeros(universe.shape, dtype=np.uint8)
         if self.viewer.circles:
             for (cx, cy, cr) in self.viewer.circles:
-                # Shift circle coordinates to match the cropped universe
                 lx = int(cx - offset_x)
                 ly = int(cy - offset_y)
                 if 0 <= lx < universe.shape[1] and 0 <= ly < universe.shape[0]:
@@ -559,7 +708,8 @@ class MainWindow(QtWidgets.QMainWindow):
             mask = np.zeros(self.channels[0].shape, dtype=np.uint8)
             cv2.circle(mask, (int(cx), int(cy)), int(eff_r), 255, -1)
             
-            raw = cv2.mean(self.channels[ch_idx], mask=mask)[0]
+            img_data = self.get_processed_image(ch_idx)
+            raw = cv2.mean(img_data, mask=mask)[0]
             vals.append(raw - bg_val)
             
         if vals:
@@ -643,9 +793,18 @@ class MainWindow(QtWidgets.QMainWindow):
             mask = np.zeros(self.channels[0].shape, dtype=np.uint8)
             cv2.circle(mask, (int(cx), int(cy)), int(row['R_Fluor']), 255, -1)
             
-            for idx, img in enumerate(self.channels):
+            for idx in range(len(self.channels)):
+                
+                # 1. Get the image (Corrected if FF is on, Raw if FF is off)
+                img = self.get_processed_image(idx)
+                
+                # 2. Calculate mean intensity inside the droplet mask
+                # The variable 'raw' now represents the Flatfield Corrected intensity
                 raw = cv2.mean(img, mask=mask)[0]
-                bg = bgs[idx]
+                
+                bg = bgs[idx] # This was pre-calculated using get_bg_val (which uses corrected img)
+                
+                # 3. Store the values
                 row[f"Ch{idx+1}_Raw"] = raw
                 row[f"Ch{idx+1}_BG"] = bg
                 row[f"Ch{idx+1}_Net"] = raw - bg
