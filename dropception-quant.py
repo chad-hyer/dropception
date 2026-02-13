@@ -564,6 +564,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_draw.clicked.connect(lambda: setattr(self.viewer, 'drawing_bg', self.btn_draw.isChecked()))
         v.addWidget(self.btn_draw)
         
+        self.lbl_info = QtWidgets.QLabel("Hover for info...")
+        self.lbl_info.setStyleSheet("color: blue; font-weight: bold;")
+        v.addWidget(self.lbl_info)
+        v.addStretch()
+
         # Graph Selector
         v.addWidget(QtWidgets.QLabel("<b>Graph Channel:</b>"))
         self.combo_plot_ch = QtWidgets.QComboBox()
@@ -590,10 +595,23 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_save_plot.clicked.connect(self.save_plot_image)
         l.addWidget(btn_save_plot)
         
-        self.lbl_info = QtWidgets.QLabel("Hover for info...")
-        self.lbl_info.setStyleSheet("color: blue; font-weight: bold;")
-        l.addWidget(self.lbl_info)
-        l.addStretch()
+        # --- 6. Droplet Size Group ---
+        gb_size = QtWidgets.QGroupBox("5. Droplet Size")
+        l_size = QtWidgets.QVBoxLayout()
+        
+        self.lbl_size_stats = QtWidgets.QLabel("Radius Stats: N/A")
+        l_size.addWidget(self.lbl_size_stats)
+        
+        # New Plot for Radius
+        self.plot_radius = PlotCanvasSize(self, width=4, height=3)
+        l_size.addWidget(self.plot_radius)
+
+        btn_save_plot_radius = QtWidgets.QPushButton("Save Plot Image")
+        btn_save_plot_radius.clicked.connect(self.save_plot_image_radius)
+        l_size.addWidget(btn_save_plot_radius)
+        
+        gb_size.setLayout(l_size)
+        l.addWidget(gb_size)
 
     def load_image(self):
         fname, _ = QtWidgets.QFileDialog.getOpenFileName(self, 'Open', '', "Images (*.tif *.tiff *.ome.tif)")
@@ -724,6 +742,8 @@ class MainWindow(QtWidgets.QMainWindow):
             area = w * h
         
         vals = []
+        radii = [] # NEW: List to store radius values
+        
         for i, (cx, cy, cr) in enumerate(self.viewer.circles):
             if not self.viewer.valid_mask[i]: continue
             
@@ -731,6 +751,9 @@ class MainWindow(QtWidgets.QMainWindow):
             if roi:
                 if not (rx <= cx <= rx + rw and ry <= cy <= ry + rh):
                     continue
+
+            # Collect Radius (using Brightfield radius 'cr')
+            radii.append(cr)
 
             eff_r = max(1, cr - shrink)
             mask = np.zeros(self.channels[0].shape, dtype=np.uint8)
@@ -741,17 +764,31 @@ class MainWindow(QtWidgets.QMainWindow):
             vals.append(raw - bg_val)
             
         if vals:
+            # --- Update Intensity Plot (Existing) ---
             peak_kde, kde_x, kde_y = self.plot_canvas.plot(vals, f"Ch {ch_idx+1} Intensity")
             mu, std = np.mean(vals), np.std(vals)
             n_val = len(vals)
             density = n_val / area if area > 0 else 0
+            self.lbl_stats.setText(f"N={n_val} | Conc={density:.2e} /px²\nMean: {mu:.1f} | Std: {std:.1f}\nKDE Peak: {peak_kde:.1f}</b>")
+
+            # --- Update Radius Plot (NEW) ---
+            # Plot Histogram & KDE
+            r_peak, _, _ = self.plot_radius.plot(radii, "Radius Distribution")
             
-            # Formatted string with scientific notation for density
-            self.lbl_stats.setText(f"N={n_val} | Conc={density:.2e} /px²\nMean: {mu:.1f} | Std: {std:.1f}\nKDE Peak: {peak_kde:.1f}")
+            # Calculate Stats
+            r_mu, r_std = np.mean(radii), np.std(radii)
+            r_cv = (r_std / r_mu * 100) if r_mu > 0 else 0 # Coeff of Variation
+            
+            self.lbl_size_stats.setText(
+                f"Mean R: {r_mu:.1f} px | Std: {r_std:.1f}\n"
+                f"CV: {r_cv:.1f}% | Peak: {r_peak:.1f}"
+            )
+
         else:
             self.lbl_stats.setText("No droplets found in ROI.")
-            self.plot_canvas.axes.clear()
-            self.plot_canvas.draw()
+            self.lbl_size_stats.setText("No droplets found.")
+            self.plot_canvas.axes.clear(); self.plot_canvas.draw()
+            self.plot_radius.axes.clear(); self.plot_radius.draw()
 
     def export_csv(self):
         if not self.viewer.circles: return
@@ -845,6 +882,23 @@ class MainWindow(QtWidgets.QMainWindow):
         stats_list = []
         if not df_details.empty:
             valid_df = df_details[df_details["Valid"] == True]
+
+            r_vals = valid_df["R_BF"].values
+            if len(r_vals) > 0:
+                r_mu, r_std = np.mean(r_vals), np.std(r_vals)
+                try:
+                    kde = gaussian_kde(r_vals)
+                    x = np.linspace(min(r_vals), max(r_vals), 200)
+                    r_peak = x[np.argmax(kde(x))]
+                except: r_peak = 0
+                
+                stats_list.append({
+                    "Channel": "Size (Radius)",
+                    "N (Count)": len(r_vals),
+                    "Mean": r_mu,
+                    "Std Dev": r_std,
+                    "KDE Peak": r_peak
+                })
             
             for idx in range(len(self.channels)):
                 col = f"Ch{idx+1}_Net"
@@ -889,6 +943,11 @@ class MainWindow(QtWidgets.QMainWindow):
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save Plot", "plot.png", "Images (*.png *.pdf)")
         if path:
             self.plot_canvas.figure.savefig(path)
+
+    def save_plot_image_radius(self):
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save Plot", "plot.png", "Images (*.png *.pdf)")
+        if path:
+            self.plot_radius.figure.savefig(path)
     
     def get_local_bg(self, ch_img, cx, cy, r_inner, r_outer, all_circles):
         """
@@ -933,10 +992,22 @@ class MainWindow(QtWidgets.QMainWindow):
 # --- Plotter ---
 class PlotCanvas(FigureCanvas):
     def __init__(self, parent=None, width=5, height=4):
+        # 1. Initialize Figure
         fig = Figure(figsize=(width, height), dpi=100)
         self.axes = fig.add_subplot(111)
+        
+        # 2. Adjust layout to prevent label clipping
+        fig.tight_layout() 
+        
         super().__init__(fig)
         self.setParent(parent)
+
+        # 3. --- THE FIX: Enforce Minimum Height ---
+        # This tells the layout engine: "Do not shrink me smaller than 250 pixels"
+        # Since this is inside a ScrollArea, this will force the scrollbar to appear
+        # rather than squishing the graph.
+        self.setMinimumHeight(250) 
+        self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
 
     def plot(self, data, title):
         self.axes.clear()
@@ -952,8 +1023,52 @@ class PlotCanvas(FigureCanvas):
                 peak = x[np.argmax(y)]
                 kde_x, kde_y = x, y
             except: pass
-        self.axes.set_title(title)
+        self.axes.set_title(title, fontweight=600, fontsize=14)
+        self.axes.set_ylabel('Density', fontsize=12)
+        self.axes.set_xlabel('DE Intensity (RFU)', fontsize=12)
         self.axes.legend()
+        self.figure.tight_layout() # Ensure labels don't get cut off during updates
+        self.draw()
+        return peak, kde_x, kde_y
+
+class PlotCanvasSize(FigureCanvas):
+    def __init__(self, parent=None, width=5, height=4):
+        # 1. Initialize Figure
+        fig = Figure(figsize=(width, height), dpi=100)
+        self.axes = fig.add_subplot(111)
+        
+        # 2. Adjust layout to prevent label clipping
+        fig.tight_layout() 
+        
+        super().__init__(fig)
+        self.setParent(parent)
+
+        # 3. --- THE FIX: Enforce Minimum Height ---
+        # This tells the layout engine: "Do not shrink me smaller than 250 pixels"
+        # Since this is inside a ScrollArea, this will force the scrollbar to appear
+        # rather than squishing the graph.
+        self.setMinimumHeight(250) 
+        self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+
+    def plot(self, data, title):
+        self.axes.clear()
+        self.axes.hist(data, bins=30, density=True, alpha=0.5, color='skyblue', label='Hist')
+        peak = 0
+        kde_x, kde_y = None, None
+        if len(data) > 1:
+            try:
+                kde = gaussian_kde(data)
+                x = np.linspace(min(data), max(data), 200)
+                y = kde(x)
+                self.axes.plot(x, y, 'r-', lw=2, label='KDE')
+                peak = x[np.argmax(y)]
+                kde_x, kde_y = x, y
+            except: pass
+        self.axes.set_title(title, fontweight=600, fontsize=14)
+        self.axes.set_ylabel('Density', fontsize=12)
+        self.axes.set_xlabel('DE Radius (px)', fontsize=12)
+        self.axes.legend()
+        self.figure.tight_layout() # Ensure labels don't get cut off during updates
         self.draw()
         return peak, kde_x, kde_y
 

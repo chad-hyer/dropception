@@ -171,7 +171,7 @@ The tool exports a `.xlsx` file containing row-by-row data for every detected do
 
 **Summary Stats:**
 
-*   **Channel:** The channel selected for the measurement.
+*   **Channel:** The channel selected for the measurement. DE size measurements are also moved into the channel section. 
 *   **N (Count):** Number of DEs in selection.
 *   **Area (px^2):** Area of selection for analysis.
 *   **Density (N/px^2:**) Can be equated to DE concentration if you can convert pixels to absolute area measuements and know the height of the slide.
