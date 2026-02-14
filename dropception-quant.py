@@ -769,7 +769,7 @@ class MainWindow(QtWidgets.QMainWindow):
             mu, std = np.mean(vals), np.std(vals)
             n_val = len(vals)
             density = n_val / area if area > 0 else 0
-            self.lbl_stats.setText(f"N={n_val} | Conc={density:.2e} /px²\nMean: {mu:.1f} | Std: {std:.1f}\nKDE Peak: {peak_kde:.1f}</b>")
+            self.lbl_stats.setText(f"N={n_val} | Conc={density:.2e} /px²\nMean: {mu:.1f} | Std: {std:.1f}\nKDE Peak: {peak_kde:.1f}")
 
             # --- Update Radius Plot (NEW) ---
             # Plot Histogram & KDE
