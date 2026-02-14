@@ -44,6 +44,54 @@ class ImageViewer(QtWidgets.QWidget):
         # Analysis ROI (Crop)
         self.analysis_roi = None # (x, y, w, h)
         self.drawing_roi = False
+    
+    def generate_full_res_image(self):
+        if not self.channels_data: return None
+        h, w = self.channels_data[0]['data'].shape
+        comp_img = np.zeros((h, w, 3), dtype=np.float32)
+        has_visible = False
+        
+        # 1. Rebuild the composite at full resolution
+        for ch in self.channels_data:
+            if not ch['visible']: continue
+            has_visible = True
+            img_float = cv2.normalize(ch['data'].astype(np.float32), None, 0, 1.0, cv2.NORM_MINMAX)
+            clip_thresh = ch['clip'] / 255.0
+            if clip_thresh > 0:
+                img_float = np.maximum(0, img_float - clip_thresh)
+            
+            c_rgb = self.colormaps.get(ch['color'], [1,1,1])
+            layer = np.dstack([img_float * c_rgb[0], img_float * c_rgb[1], img_float * c_rgb[2]])
+            comp_img += layer
+
+        if has_visible:
+            comp_img = np.clip(comp_img, 0, 1)
+            comp_img = (comp_img * 255).astype(np.uint8)
+        else:
+            comp_img = np.zeros((h, w, 3), dtype=np.uint8)
+
+        # 2. Convert to QImage (.copy() is vital here to prevent memory corruption)
+        qt_img = QtGui.QImage(comp_img.data, w, h, 3 * w, QtGui.QImage.Format_RGB888).copy()
+        
+        # 3. Draw Overlays (Circles and ROI)
+        painter = QtGui.QPainter(qt_img)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        
+        if self.circles is not None and self.show_circles:
+            pen_w = max(1, int(w/800)) # Scale pen width so it's visible on large images
+            for i, (cx, cy, cr) in enumerate(self.circles):
+                color = QtCore.Qt.cyan if self.valid_mask[i] else QtCore.Qt.red
+                painter.setPen(QtGui.QPen(color, pen_w))
+                painter.drawEllipse(QtCore.QPointF(cx, cy), cr, cr)
+                
+        if self.analysis_roi is not None:
+            rx, ry, rw, rh = self.analysis_roi
+            pen_w = max(2, int(w/400))
+            painter.setPen(QtGui.QPen(QtCore.Qt.green, pen_w, QtCore.Qt.DashLine))
+            painter.drawRect(QtCore.QRectF(rx, ry, rw, rh))
+            
+        painter.end()
+        return qt_img
 
     def set_data(self, channels_data, circles=None, valid_mask=None):
         """
@@ -320,6 +368,19 @@ class MainWindow(QtWidgets.QMainWindow):
         #Cache Storage
         self.cached_processed_images = {} # Key: Channel Index, Value: Processed Image
     
+    def save_composite_image(self):
+        if not self.channels:
+            QtWidgets.QMessageBox.warning(self, "No Image", "No image is currently loaded.")
+            return
+            
+        img = self.viewer.generate_full_res_image()
+        if img is None: 
+            return
+            
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save View Image", "composite.png", "Images (*.png *.jpg *.tiff)")
+        if path:
+            img.save(path)
+
     def refresh_cache(self):
         """
         re-calculates processed images for ALL channels and stores them.
@@ -470,8 +531,20 @@ class MainWindow(QtWidgets.QMainWindow):
         v.addWidget(btn); gb.setLayout(v); l.addWidget(gb)
 
         # 2. Channels
-        gb = QtWidgets.QGroupBox("2. View Layers"); self.ch_layout = QtWidgets.QVBoxLayout()
-        gb.setLayout(self.ch_layout); l.addWidget(gb)
+        gb = QtWidgets.QGroupBox("2. View Layers")
+        view_layers_main_layout = QtWidgets.QVBoxLayout()
+        
+        # Sub-layout strictly for the dynamically generated channels
+        self.ch_layout = QtWidgets.QVBoxLayout()
+        view_layers_main_layout.addLayout(self.ch_layout)
+        
+        # The new Save Image button (Safe from being cleared)
+        self.btn_save_view = QtWidgets.QPushButton("Save Composite Image")
+        self.btn_save_view.clicked.connect(self.save_composite_image)
+        view_layers_main_layout.addWidget(self.btn_save_view)
+        
+        gb.setLayout(view_layers_main_layout)
+        l.addWidget(gb)
 
         # --- NEW GROUP: Flatfield Correction ---
         gb_ff = QtWidgets.QGroupBox("Flatfield Correction")
